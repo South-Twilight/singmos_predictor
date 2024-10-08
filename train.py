@@ -51,7 +51,7 @@ def main():
         "valid_batch_size": 2,
         "valid_num_workers": 2,
         "learning_rate": 1e-4,
-        "max_epoch": 50,
+        "epoch": 50,
         "patience": 20,
         "random_seed": args.seed,
     }
