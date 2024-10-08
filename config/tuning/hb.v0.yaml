@@ -1,0 +1,19 @@
+model_param:
+  # ssl model can be chosen:
+      # hubert_base hubert_large 
+      # wav2vec2_base_960 wav2vec2_large_lv60_cv_swbd_fsh 
+      # wavlm_base wavlm_large
+      # xls_r_300m
+  ssl_model_type: "hubert_base"
+  # mos model related
+  use_f0: false
+  use_f0_var: false
+  use_judge_id : false
+  use_speaker_id : false
+  hdim : 128
+  use_lstm : false
+
+alpha_frame: 0.6
+use_frame_loss: false
+use_margin: true
+loss_type : "L1"
