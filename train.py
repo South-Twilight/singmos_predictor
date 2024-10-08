@@ -46,7 +46,7 @@ def main():
     # wandb config
     exp_config = {
         "architecture": f"{args.arch}",
-        "train_batch_size": 4,
+        "train_batch_size": 8,
         "train_num_workers": 2,
         "valid_batch_size": 2,
         "valid_num_workers": 2,
