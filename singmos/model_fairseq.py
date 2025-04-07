@@ -12,9 +12,6 @@ from utils import calc_f0_variation
 
 import logging
 
-import random
-random.seed(1984)
-
 class MyDataset(Dataset):
     def __init__(self, wavdir, mos_list):
         self.mos_lookup = { }

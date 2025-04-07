@@ -8,7 +8,7 @@ model_param:
   # mos model related
   use_f0: false
   use_f0_var: false
-  use_judge_id : false
+  use_judge_id : true
   use_speaker_id : false
   hdim : 128
   use_lstm : false

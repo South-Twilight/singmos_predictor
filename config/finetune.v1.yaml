@@ -1,0 +1,50 @@
+##########################################################
+#                      MODEL SETTING                     #
+##########################################################
+model_param:
+  ssl_model_type: "wav2vec2_base_960"
+  # ssl model can be chosen:
+      # hubert_base hubert_large 
+      # wav2vec2_base_960 wav2vec2_large_lv60_cv_swbd_fsh 
+      # wavlm_base wavlm_large
+      # xls_r_300m
+      # ...
+  hdim: 128
+  # f0 related
+  use_f0: false
+  use_f0_var: false
+  # judge related
+  use_judge_id : false
+  judge_num: 50
+  # projection layer
+  activate_func: "relu"
+  output_type: "scalar"
+  mos_clip: True
+  use_lstm : false
+  # loss related
+  loss_type: "L2"
+  use_margin: True
+  margin: 0.1
+  use_frame_level: False
+  alpha_judge: 0.8
+  alpha_frame: 0.5
+
+##########################################################
+#                   TRAINING SETTING                     #
+##########################################################
+max_epoch: 50
+train_patience: 20
+
+train_batch_size: 8
+train_num_workers: 4
+
+valid_batch_size: 4
+valid_num_workers: 2
+
+##########################################################
+#                  OPTIMIZER SETTING                     #
+##########################################################
+optim: SGD           # optimizer type
+optim_conf:           # keyword arguments for selected optimizer
+    lr: 1.0e-03       # learning rate
+    momentum: 0.9
