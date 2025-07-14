@@ -16,7 +16,7 @@ from datasets import load_dataset
 
 from singmos.model import MOS_Predictor
 from singmos.model import MOS_Loss
-from singmos.dataset import MyDataset
+from singmos.dataset import MOSDataset
 
 import random
 
@@ -85,8 +85,8 @@ def main():
     with open(f"{datadir}/info/score.json", "r") as f:
         score_info = json.load(f)
     
-    train_set = MyDataset(split_info["train"], score_info["utterance"], datadir,  use_judge_id, use_f0)
-    valid_set = MyDataset(split_info["valid"], score_info["utterance"], datadir, use_judge_id, use_f0)
+    train_set = MOSDataset(split_info["train"], score_info["utterance"], datadir,  use_judge_id, use_f0)
+    valid_set = MOSDataset(split_info["valid"], score_info["utterance"], datadir, use_judge_id, use_f0)
         
     trainloader = DataLoader(
         train_set, 

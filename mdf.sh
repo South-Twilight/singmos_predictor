@@ -29,10 +29,7 @@ answer_dir=answer
 . utils/parse_options.sh
 
 pt_dir="pt_${pt_dataset}_$(basename "${pt_config}" .yaml)_${rd_seed}"
-ft_dir="ft_${ft_dataset}_$(basename "${pt_config}" .yaml)_${rd_seed}_BASE_${pt_dir}"
-
-echo $pt_dir
-echo $ft_dir
+ft_dir="ft_${ft_dataset}_$(basename "${ft_config}" .yaml)_${rd_seed}_BASE_${pt_dir}"
 
 mkdir -p ${output_dir}
 mkdir -p ${answer_dir}
@@ -41,7 +38,7 @@ if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
     log "Stage 1: pretrain stage on ${pt_dataset}"
 
     outdir=${output_dir}/${pt_dir}
-    ansdir=${answer_dir}/${pt_dir}
+    ansdir=${answer_dir}/"pt_${pt_dataset}_$(basename "${pt_config}" .yaml)"
 
     python train.py \
         --datadir ${data_dir} \
@@ -63,7 +60,7 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     log "Stage 2: finetune stage on ${ft_dataset}"
 
     outdir=${output_dir}/${ft_dir}
-    ansdir=${answer_dir}/${ft_dir}
+    ansdir=${answer_dir}/"ft_${ft_dataset}_$(basename "${ft_config}" .yaml)_BASE_pt_${pt_dataset}_$(basename "${pt_config}" .yaml)"
 
     python train.py \
         --datadir ${data_dir} \

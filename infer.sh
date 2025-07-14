@@ -1,30 +1,44 @@
 #!/bin/bash
 
-# model_configs=("v0.yaml" "v00.yaml" "v000.yaml" "v0000.yaml" "v00000.yaml" "v000000.yaml" "v0000000.yaml")
-# model_configs=("v1.yaml" "v11.yaml" "v111.yaml")
-model_configs=("hb.v0.yaml" "hl.v0.yaml" "w2vl.v0.yaml" "wavlmb.v0.yaml" "wavlml.v0.yaml" "xlsr.v0.yaml")
-# seeds=(1984 2301 3906 4918)
-seeds=(4918)
-devices=(0 1 2 4 5 6)
+devices=(0 1 2)
+seeds=(0 1234 1984)
+pt_datasets=("singmos_v1" "singmos_v2" "singmos_full")
+ft_datasets=("singmos_full")
+answer_dir=answer
+pt_config="config/pretrain.v1.yaml"
+ft_config="config/finetune.v1.yaml"
 
+for i in "${!pt_datasets[@]}"; do
+    pt_dataset="${pt_datasets[$i]}"
+    pids=()
+    for j in "${!seeds[@]}"; do
+        device="${devices[$j]}"
+        (
+            echo "RUN $pt_dataset+rd_$seed+device_$device"
+            CUDA_VISIBLE_DEVICES=$device ./mdf.sh \
+                --pt_dataset $pt_dataset \
+                --rd_seed $seed \
+                --pt_config $pt_config \
+                --ft_config $ft_config \
+                --answer_dir $answer_dir
+        ) &
+        pids+=($!)
+    done
+    i=0; for pid in "${pids[@]}"; do wait "${pid}" || ((++i)); done
+    [ "${i}" -gt 0 ] && echo "$0: ${i} background jobs are failed." && exit 1;
 
-# 遍历所有模型配置文件和种子组合
-for i in "${!model_configs[@]}"; do
-    config="${model_configs[$i]}"
-    vid=$(echo "$config" | sed 's/\.v0.yaml$//')
-    device="${devices[$i]}"
-    echo "run $config with CUDA:$device"
-    for seed in "${seeds[@]}"; do
-        echo "Running: python infer.py --model_config $config --seed $seed"
-        CUDA_VISIBLE_DEVICES="$device" python infer.py \
-            --datadir data/voicemos2024/DATA \
-            --model_config "config/iscslp/s3prl/${config}" \
-            --finetuned_checkpoint "ckpt/iscslp2/ckpt_${vid}" \
-            --answer_dir "answer/iscslp2" \
-            --seed "$seed" &
+    python utils/pyutils/merge_metrics.py \
+    --src_dir `pwd`/${answer_dir}/"pt_${pt_dataset}_$(basename "${pt_config}" .yaml)"
+
+    for j in "${!ft_datasets[@]}"; do
+        ft_dataset="${ft_datasets[$j]}"
+        python utils/pyutils/merge_metrics.py \
+        --src_dir `pwd`/${answer_dir}/"ft_${ft_dataset}_$(basename "${ft_config}" .yaml)_BASE_pt_${pt_dataset}_$(basename "${pt_config}" .yaml)"
     done
 done
 
-wait
-
 echo "All runs are done."
+
+python utils/pyutils/merge_results.py \
+--base_path `pwd`/${answer_dir} \
+--output_file `pwd`/${answer_dir}/results.csv

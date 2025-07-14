@@ -5,10 +5,10 @@ import torchaudio
 import torch.nn as nn
 from torch.utils.data.dataset import Dataset
 
-from singmos.utils import calc_f0_variation
-from singmos.utils import pad_sequence
+from singmos2.utils import calc_f0_variation
+from singmos2.utils import pad_sequence
 
-class MyDataset(Dataset):
+class MOSDataset(Dataset):
     def __init__(
         self, 
         utt_list, 

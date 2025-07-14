@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 from singmos.model import MOS_Predictor, MOS_Loss
-from singmos.dataset import MyDataset
+from singmos.dataset import MOSDataset
 
 import glob
 import yaml
@@ -142,6 +142,22 @@ def calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, dset):
 
     return metrics_answer
 
+def write_metrics(metrics_answer, pred_utt_MOS, pred_dir, config_name):
+    # write metrics
+    # make_dir(os.path.join(pred_dir, "metrics"))
+    # make_dir(os.path.join(pred_dir, "utt_mos"))
+    filename = config_name.split("/")[-1].split(".")[0]
+    # write metrics
+    with open(os.path.join(pred_dir, "metrics" + ".json"), "w", encoding="utf-8") as f:
+        json.dump(metrics_answer, f, cls=NumpyEncoder, indent=4)
+    print('Metrics writen in {}'.format(os.path.join(pred_dir, "metrics" + ".json")))
+    # write utterance mos
+    with open(os.path.join(pred_dir, "utt_mos" + ".txt"), "w", encoding="utf-8") as f:
+        for k, v in pred_utt_MOS.items():
+            outl = k.split('.')[0] + ',' + str(v) + '\n'
+            f.write(outl)
+    print('Utt MOS writen in {}'.format(os.path.join(pred_dir, "utt_mos" + ".txt")))
+
 
 def get_parser():
     parser = argparse.ArgumentParser()
@@ -151,6 +167,7 @@ def get_parser():
     parser.add_argument('--ckpt', type=str, required=True, help='Path to finetuned MOS prediction checkpoint.')
     parser.add_argument('--answer_dir', type=str, required=False, default='answer', help='Output directory for your answer file')
     parser.add_argument('--seed', type=int, required=False, default=1984, help='Seed of ramdom setting')
+    parser.add_argument('--use_detail_info', type=bool, required=False, default=True, help='Whether to use detail information.')
     return parser
 
 
@@ -179,10 +196,21 @@ def main():
     model.load_state_dict(torch.load(ckpt))
 
     # load infer data
+    unseen_dict = {}
+    showID = False
+    showOOD = False
     with open(f"{datadir}/info/split.json", "r") as f:
         split_info = json.load(f)
     with open(f"{datadir}/info/score.json", "r") as f:
         score_info = json.load(f)
+
+    if args.use_detail_info:
+        with open(f"{datadir}/info/sys_info.json", "r") as f:
+            sys_info = json.load(f)
+            for key in sys_info.keys():
+                unseen_dict[key] = sys_info[key]["tag"]["unseen"]
+        showID = True
+        showOOD = True
 
     use_f0 = model_config["model_param"]["use_f0"] or model_config["model_param"]["use_f0_var"]
 
@@ -190,33 +218,60 @@ def main():
     
     for test_set in test_sets:
         # Load model
-        print('Loading data')
-        eval_set = MyDataset(split_info[test_set]["eval"], score_info["utterance"], datadir, use_judge_id=False, use_f0=use_f0)
+        print(f'Loading data {test_set}')
+        eval_set = MOSDataset(split_info[test_set]["eval"], score_info["utterance"], datadir, use_judge_id=False, use_f0=use_f0)
         eval_loader = DataLoader(
             eval_set, batch_size=1, shuffle=False, num_workers=2, collate_fn=eval_set.collate_fn
         )
 
         # Infer model
         metrics_answer = {}
-        pred_sys_MOS, pred_utt_MOS  = infer_mos(model, eval_loader, test_set, device)
-        gt_sys_MOS = { k: float(score_info["system"][k]) for k in eval_set.get_sys_names() }
-        gt_utt_MOS = { k: float(score_info["utterance"][k]["score"]["mos"]) for k in eval_set.get_utt_names() }
-        metrics_answer = calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, test_set)
-
-        # write metrics
-        make_dir(os.path.join(answer_dir, test_set, "metrics"))
-        filename = args.model_config.split("/")[-1].split(".")[0] + "_" + str(args.seed)
-        with open(os.path.join(answer_dir, test_set, "metrics", filename + ".json"), "w", encoding="utf-8") as f:
-            json.dump(metrics_answer, f, cls=NumpyEncoder, indent=4)
-        print('Metrics writen in {}'.format(os.path.join(answer_dir, test_set, "metrics", filename + ".json")))
-
-        # write utterance mos
-        make_dir(os.path.join(answer_dir, test_set, "utt_mos"))
-        with open(os.path.join(answer_dir, test_set, "utt_mos", filename + ".txt"), "w", encoding="utf-8") as f:
-            for k, v in pred_utt_MOS.items():
-                outl = k.split('.')[0] + ',' + str(v) + '\n'
-                f.write(outl)
-        print('Utt MOS writen in {}'.format(os.path.join(answer_dir, test_set, "utt_mos", filename + ".txt")))
-
+        all_pred_sys_MOS, all_pred_utt_MOS  = infer_mos(model, eval_loader, test_set, device)
+        all_gt_sys_MOS = { k: float(score_info["system"][k]) for k in eval_set.get_sys_names() }
+        all_gt_utt_MOS = { k: float(score_info["utterance"][k]["score"]["mos"]) for k in eval_set.get_utt_names() }
+        # All
+        pred_dir = os.path.join(answer_dir, test_set, "ALL", "rand_" + str(args.seed))
+        make_dir(pred_dir)
+        metrics_answer = calc_metrics(all_gt_utt_MOS, all_pred_utt_MOS, all_gt_sys_MOS, all_pred_sys_MOS, test_set + "-ALL")
+        write_metrics(metrics_answer, all_pred_utt_MOS, pred_dir, args.model_config)
+        # In Domain
+        if showID: 
+            gt_sys_MOS = {}
+            gt_utt_MOS = {}
+            pred_sys_MOS = {}
+            pred_utt_MOS = {}
+            for key in all_gt_sys_MOS.keys():
+                if unseen_dict[key] is False:
+                    gt_sys_MOS[key] = all_gt_sys_MOS[key]
+                    pred_sys_MOS[key] = all_pred_sys_MOS[key]
+            for key in all_gt_utt_MOS.keys():
+                sys_id = key.split('-')[0]
+                if unseen_dict[sys_id] is False:
+                    gt_utt_MOS[key] = all_gt_utt_MOS[key]
+                    pred_utt_MOS[key] = all_pred_utt_MOS[key]
+            pred_dir = os.path.join(answer_dir, test_set, "ID", "rand_" + str(args.seed))
+            make_dir(pred_dir)
+            metrics_answer = calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, test_set + "-ID")
+            write_metrics(metrics_answer, pred_utt_MOS, pred_dir, args.model_config)
+        # Out Domain
+        if showOOD:
+            gt_sys_MOS = {}
+            gt_utt_MOS = {}
+            pred_sys_MOS = {}
+            pred_utt_MOS = {}
+            for key in all_gt_sys_MOS.keys():
+                if unseen_dict[key] is True:
+                    gt_sys_MOS[key] = all_gt_sys_MOS[key]
+                    pred_sys_MOS[key] = all_pred_sys_MOS[key]
+            for key in all_gt_utt_MOS.keys():
+                sys_id = key.split('-')[0]
+                if unseen_dict[sys_id] is True:
+                    gt_utt_MOS[key] = all_gt_utt_MOS[key]
+                    pred_utt_MOS[key] = all_pred_utt_MOS[key]
+            pred_dir = os.path.join(answer_dir, test_set, "OOD", "rand_" + str(args.seed))
+            make_dir(pred_dir)
+            metrics_answer = calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, test_set + "-OOD")
+            write_metrics(metrics_answer, pred_utt_MOS, pred_dir, args.model_config)
+ 
 if __name__ == '__main__':
     main()
