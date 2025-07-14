@@ -1,0 +1,1 @@
+# singmos_predictor
