@@ -8,11 +8,15 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 from singmos.model import MOS_Predictor, MOS_Loss
-from singmos.dataset import MOSDataset
+from singmos.mos_dataset import MOSDataset
 
 import glob
 import yaml
 import json
+
+import logging
+logging.basicConfig(level=logging.INFO)
+
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -20,258 +24,220 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return super().default(obj)
 
+
 def systemID(uttID):
     return uttID.split('-')[0]
+
 
 def make_dir(dir):
     if not os.path.exists(dir):
         os.makedirs(dir)
 
 
+def build_eval_loader(datadir, config, eval_list, score_info, sys_info):
+    eval_set = MOSDataset(
+        datadir=datadir,
+        utt_list=eval_list,
+        score_infos=score_info["utterance"],
+        sys_info=sys_info,
+        use_domain_id=config["model_param"].get("use_domain_id", False),
+        use_judge_id=config["model_param"].get("use_judge_id", False),
+        use_pitch=config["model_param"].get("use_pitch", False),
+        pitch_type=config["model_param"].get("pitch_type", "note"),
+        sample_rate=config["model_param"].get("sample_rate", 16000),
+        max_duration=config["model_param"].get("max_duration", 10.0),
+    )
+    eval_loader = DataLoader(
+        eval_set,
+        batch_size=15,
+        shuffle=False,
+        num_workers=8,
+        collate_fn=eval_set.collate_fn,
+    )
+    return eval_loader, eval_set, score_info
+
+
 def infer_mos(model, dataloader, dset, device):
-    pred_utt_mos = {}  # filename : prediction
+    pred_utt_mos = {}
     pred_sys_list = {}
-    
-    print(f'Starting prediction over {dset}')
+
+    logging.info(f'Starting prediction over {dset}')
 
     for i, data in enumerate(dataloader, 0):
-        wavnames, wavs, wavs_length, judge_gt_scores, mean_gt_scores, ret_dict = data
+        wavnames, wavs, wavs_length, gt_utt_scores, gt_frame_scores, ret_dict = data
         wavs = wavs.to(device)
         wavs_length = wavs_length.to(device)
-        judge_gt_scores = judge_gt_scores.to(device)
-        mean_gt_scores = mean_gt_scores.to(device)
-        f0_variation = None
-        f0 = None
-        judge_id = None
-        if "f0_variation" in ret_dict:
-            f0_variation = ret_dict["f0_variation"].to(device)
-        if "f0" in ret_dict:
-            f0 = ret_dict["f0"].to(device)
-        if "judge_id" in ret_dict:
-            judge_id = ret_dict["judge_id"].to(device)
+        batch_size = len(wavnames)
 
-        batch = {}
-        batch.update(
-            audio=wavs,
-            audio_length=wavs_length,
-            f0_variation=f0_variation,
-            f0=f0,
-            judge_id=judge_id,
-            mean_score=mean_gt_scores,
-            judge_score=judge_gt_scores,
-        )
+        batch = {
+            "audio": wavs,
+            "audio_length": wavs_length,
+            "is_train": False,
+        }
+        # optional features
+        if "pitch_var" in ret_dict:
+            batch["pitch_var"] = ret_dict["pitch_var"].to(device)
+        if "pitch_note" in ret_dict:
+            batch["pitch_note"] = ret_dict["pitch_note"].to(device)
+        if "pitch_histogram" in ret_dict:
+            batch["pitch_histogram"] = ret_dict["pitch_histogram"].to(device)
+        if "pitch" in ret_dict:
+            batch["pitch"] = ret_dict["pitch"].to(device)
         
-        loss, stats, ret_val = model(**batch)
+        # Handle judge_id and domain_id with defaults
+        if "judge_id" in ret_dict:
+            batch["judge_id"] = ret_dict["judge_id"].to(device)
+        elif model.use_judge_id:
+            # Default judge_id = 0 when model expects it but data doesn't have it
+            batch["judge_id"] = torch.zeros(batch_size, dtype=torch.long, device=device)
+            
+        if "domain_id" in ret_dict:
+            batch["domain_id"] = ret_dict["domain_id"].to(device)
+        elif model.use_domain_id:
+            # Default domain_id = 1 when model expects it but data doesn't have it
+            batch["domain_id"] = torch.ones(batch_size, dtype=torch.long, device=device)
 
-        utt_mos = ret_val["mean_utt_score"].cpu().detach().numpy()[0][0]
-        utt_id = wavnames[0]
-        sys_id = systemID(utt_id)
-        pred_utt_mos[wavnames[0]] = utt_mos
-        if sys_id not in pred_sys_list:
-            pred_sys_list[sys_id] = []
-        pred_sys_list[sys_id].append(utt_mos)
+        with torch.no_grad():
+            loss, stats, ret_val = model(**batch)
 
-    pred_sys_mos = {}
-    for k, v in pred_sys_list.items():
-        avg_MOS = sum(v) / (len(v) * 1.0)
-        pred_sys_mos[k] = avg_MOS
+        # Handle batch predictions
+        utt_scores = ret_val["utt_score"].squeeze().detach().cpu()  # [B]
+        if utt_scores.dim() == 0:  # Handle case where B=1
+            utt_scores = utt_scores.unsqueeze(0)
+        
+        # Process each sample in the batch
+        for j in range(batch_size):
+            utt_mos = utt_scores[j].item()
+            utt_id = wavnames[j]
+            sys_id = systemID(utt_id)
+            pred_utt_mos[utt_id] = utt_mos
+            if sys_id not in pred_sys_list:
+                pred_sys_list[sys_id] = []
+            pred_sys_list[sys_id].append(utt_mos)
 
+    pred_sys_mos = {k: (sum(v) / (len(v) * 1.0)) for k, v in pred_sys_list.items()}
     return pred_sys_mos, pred_utt_mos
 
 
 def calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, dset):
-    print(f'Starting prediction over {dset}')
-    metrics_answer = {}
-    metrics_answer["system"] = {}
-    metrics_answer["utterance"] = {}
+    logging.info(f'Starting prediction over {dset}')
+    metrics_answer = {"system": {}, "utterance": {}}
 
     assert len(gt_utt_MOS) == len(pred_utt_MOS)
     assert len(gt_sys_MOS) == len(pred_sys_MOS)
 
-    ## compute correls.
+    # UTTERANCE
     sorted_uttIDs = sorted(gt_utt_MOS.keys())
-    ts = []
-    ps = []
-    for uttID in sorted_uttIDs:
-        t = gt_utt_MOS[uttID]
-        p = pred_utt_MOS[uttID]
-        ts.append(t)
-        ps.append(p)
+    truths = np.array([gt_utt_MOS[u] for u in sorted_uttIDs])
+    preds = np.array([pred_utt_MOS[u] for u in sorted_uttIDs])
 
-    truths = np.array(ts)
-    preds = np.array(ps)
+    MSE = np.mean((truths - preds) ** 2)
+    LCC = np.corrcoef(truths, preds)[0][1]
+    SRCC = scipy.stats.spearmanr(truths.T, preds.T)[0]
+    KTAU = scipy.stats.kendalltau(truths, preds)[0]
 
-    ### UTTERANCE
-    MSE=np.mean((truths-preds)**2)
-    metrics_answer["utterance"]["MSE"] = MSE
-    LCC=np.corrcoef(truths, preds)
-    metrics_answer["utterance"]["LCC"] = LCC[0][1]
-    SRCC=scipy.stats.spearmanr(truths.T, preds.T)
-    metrics_answer["utterance"]["SRCC"] = SRCC[0]
-    KTAU=scipy.stats.kendalltau(truths, preds)
-    metrics_answer["utterance"]["KTAU"] = KTAU[0]
-    print('[UTTERANCE] Test error= %f' % MSE)
-    print('[UTTERANCE] Linear correlation coefficient= %f' % LCC[0][1])
-    print('[UTTERANCE] Spearman rank correlation coefficient= %f' % SRCC[0])
-    print('[UTTERANCE] Kendall Tau rank correlation coefficient= %f' % KTAU[0])
+    metrics_answer["utterance"].update(MSE=MSE, LCC=LCC, SRCC=SRCC, KTAU=KTAU)
+    logging.info('[UTTERANCE] Test error= %f' % MSE)
+    logging.info('[UTTERANCE] Linear correlation coefficient= %f' % LCC)
+    logging.info('[UTTERANCE] Spearman rank correlation coefficient= %f' % SRCC)
+    logging.info('[UTTERANCE] Kendall Tau rank correlation coefficient= %f' % KTAU)
 
-    ### SYSTEM
-    ## make lists sorted by system
+    # SYSTEM
     pred_sysIDs = sorted(pred_sys_MOS.keys())
-    sys_p = []
-    sys_t = []
-    for sysID in pred_sysIDs:
-        sys_p.append(pred_sys_MOS[sysID])
-        sys_t.append(gt_sys_MOS[sysID])
+    sys_true = np.array([gt_sys_MOS[s] for s in pred_sysIDs])
+    sys_pred = np.array([pred_sys_MOS[s] for s in pred_sysIDs])
 
-    sys_true = np.array(sys_t)
-    sys_predicted = np.array(sys_p)
+    MSE = np.mean((sys_true - sys_pred) ** 2)
+    LCC = np.corrcoef(sys_true, sys_pred)[0][1]
+    SRCC = scipy.stats.spearmanr(sys_true.T, sys_pred.T)[0]
+    KTAU = scipy.stats.kendalltau(sys_true, sys_pred)[0]
 
-    MSE=np.mean((sys_true-sys_predicted)**2)
-    metrics_answer["system"]["MSE"] = MSE
-    LCC=np.corrcoef(sys_true, sys_predicted)
-    metrics_answer["system"]["LCC"] = LCC[0][1]
-    SRCC=scipy.stats.spearmanr(sys_true.T, sys_predicted.T)
-    metrics_answer["system"]["SRCC"] = SRCC[0]
-    KTAU=scipy.stats.kendalltau(sys_true, sys_predicted)
-    metrics_answer["system"]["KTAU"] = KTAU[0]
-    print('[SYSTEM] Test error= %f' % MSE)
-    print('[SYSTEM] Linear correlation coefficient= %f' % LCC[0][1])
-    print('[SYSTEM] Spearman rank correlation coefficient= %f' % SRCC[0])
-    print('[SYSTEM] Kendall Tau rank correlation coefficient= %f' % KTAU[0])
+    metrics_answer["system"].update(MSE=MSE, LCC=LCC, SRCC=SRCC, KTAU=KTAU)
+    logging.info('[SYSTEM] Test error= %f' % MSE)
+    logging.info('[SYSTEM] Linear correlation coefficient= %f' % LCC)
+    logging.info('[SYSTEM] Spearman rank correlation coefficient= %f' % SRCC)
+    logging.info('[SYSTEM] Kendall Tau rank correlation coefficient= %f' % KTAU)
 
     return metrics_answer
 
+
 def write_metrics(metrics_answer, pred_utt_MOS, pred_dir, config_name):
-    # write metrics
-    # make_dir(os.path.join(pred_dir, "metrics"))
-    # make_dir(os.path.join(pred_dir, "utt_mos"))
     filename = config_name.split("/")[-1].split(".")[0]
-    # write metrics
     with open(os.path.join(pred_dir, "metrics" + ".json"), "w", encoding="utf-8") as f:
         json.dump(metrics_answer, f, cls=NumpyEncoder, indent=4)
-    print('Metrics writen in {}'.format(os.path.join(pred_dir, "metrics" + ".json")))
-    # write utterance mos
+    logging.info('Metrics writen in {}'.format(os.path.join(pred_dir, "metrics" + ".json")))
     with open(os.path.join(pred_dir, "utt_mos" + ".txt"), "w", encoding="utf-8") as f:
         for k, v in pred_utt_MOS.items():
             outl = k.split('.')[0] + ',' + str(v) + '\n'
             f.write(outl)
-    print('Utt MOS writen in {}'.format(os.path.join(pred_dir, "utt_mos" + ".txt")))
+    logging.info('Utt MOS writen in {}'.format(os.path.join(pred_dir, "utt_mos" + ".txt")))
 
 
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--datadir', type=str, required=True, help='Path of your DATA/ directory')
-    # parser.add_argument('--dataname', type=str, required=True, help='Nmae of dataset')
     parser.add_argument('--model_config', type=str, required=True, help='Path to model config')
     parser.add_argument('--ckpt', type=str, required=True, help='Path to finetuned MOS prediction checkpoint.')
-    parser.add_argument('--answer_dir', type=str, required=False, default='answer', help='Output directory for your answer file')
-    parser.add_argument('--seed', type=int, required=False, default=1984, help='Seed of ramdom setting')
-    parser.add_argument('--use_detail_info', type=bool, required=False, default=True, help='Whether to use detail information.')
+    parser.add_argument('--answer_dir', type=str, default='answer', help='Output directory for your answer file')
+    parser.add_argument('--seed', type=int, default=1984, help='Seed of random setting')
+    parser.add_argument('--test_sets', action='append', default=[], help='Test set names in split.json to evaluate (can be used multiple times)')
     return parser
 
 
 def main():
     args = get_parser().parse_args()
-    
+    logging.info(f"test args: {args.test_sets}")
+
     datadir = args.datadir
     answer_dir = args.answer_dir
     make_dir(answer_dir)
 
     # load model
     ckpt = args.ckpt
-    print(f'infer with model: {ckpt}\n')
+    logging.info(f'infer with model: {ckpt}\n')
 
     with open(args.model_config) as f:
         model_config = yaml.load(f, Loader=yaml.Loader)
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print('DEVICE: ' + str(device))
-   
+    logging.info('DEVICE: ' + str(device))
+
     model = MOS_Predictor(
-        **model_config["model_param"]
-    ) 
+        **model_config["model_param"],
+        **model_config["loss"],
+    )
     model.to(device)
     model.eval()
-    model.load_state_dict(torch.load(ckpt))
+    model.load_state_dict(torch.load(ckpt, map_location=device))
 
-    # load infer data
-    unseen_dict = {}
-    showID = False
-    showOOD = False
+    # load split
     with open(f"{datadir}/info/split.json", "r") as f:
         split_info = json.load(f)
     with open(f"{datadir}/info/score.json", "r") as f:
         score_info = json.load(f)
+    with open(f"{datadir}/info/sys_info.json", "r") as f:
+        sys_info = json.load(f)
 
-    if args.use_detail_info:
-        with open(f"{datadir}/info/sys_info.json", "r") as f:
-            sys_info = json.load(f)
-            for key in sys_info.keys():
-                unseen_dict[key] = sys_info[key]["tag"]["unseen"]
-        showID = True
-        showOOD = True
-
-    use_f0 = model_config["model_param"]["use_f0"] or model_config["model_param"]["use_f0_var"]
-
-    test_sets = ["singmos_v1", "singmos_v2"]
-    
-    for test_set in test_sets:
-        # Load model
-        print(f'Loading data {test_set}')
-        eval_set = MOSDataset(split_info[test_set]["eval"], score_info["utterance"], datadir, use_judge_id=False, use_f0=use_f0)
-        eval_loader = DataLoader(
-            eval_set, batch_size=1, shuffle=False, num_workers=2, collate_fn=eval_set.collate_fn
-        )
+    for test_set in args.test_sets:
+        logging.info(f'Loading data {test_set}')
+        eval_list = split_info[test_set]["eval"]
+        eval_loader, eval_set, score_info = build_eval_loader(datadir, model_config, eval_list, score_info, sys_info)
 
         # Infer model
-        metrics_answer = {}
-        all_pred_sys_MOS, all_pred_utt_MOS  = infer_mos(model, eval_loader, test_set, device)
-        all_gt_sys_MOS = { k: float(score_info["system"][k]) for k in eval_set.get_sys_names() }
-        all_gt_utt_MOS = { k: float(score_info["utterance"][k]["score"]["mos"]) for k in eval_set.get_utt_names() }
+        all_pred_sys_MOS, all_pred_utt_MOS = infer_mos(model, eval_loader, test_set, device)
+        # 更安全的版本，处理不同的数据结构
+        all_gt_sys_MOS = {}
+        for k in eval_set.get_sys_names():
+            sys_score = score_info["system"][k]
+            all_gt_sys_MOS[k] = float(sys_score["score"])
+        all_gt_utt_MOS = {k: float(score_info["utterance"][k]["score"]["mos"]) for k in eval_set.get_utt_names()}
+
         # All
-        pred_dir = os.path.join(answer_dir, test_set, "ALL", "rand_" + str(args.seed))
+        pred_dir = os.path.join(answer_dir, os.path.basename(args.ckpt).split(".")[0])
         make_dir(pred_dir)
         metrics_answer = calc_metrics(all_gt_utt_MOS, all_pred_utt_MOS, all_gt_sys_MOS, all_pred_sys_MOS, test_set + "-ALL")
         write_metrics(metrics_answer, all_pred_utt_MOS, pred_dir, args.model_config)
-        # In Domain
-        if showID: 
-            gt_sys_MOS = {}
-            gt_utt_MOS = {}
-            pred_sys_MOS = {}
-            pred_utt_MOS = {}
-            for key in all_gt_sys_MOS.keys():
-                if unseen_dict[key] is False:
-                    gt_sys_MOS[key] = all_gt_sys_MOS[key]
-                    pred_sys_MOS[key] = all_pred_sys_MOS[key]
-            for key in all_gt_utt_MOS.keys():
-                sys_id = key.split('-')[0]
-                if unseen_dict[sys_id] is False:
-                    gt_utt_MOS[key] = all_gt_utt_MOS[key]
-                    pred_utt_MOS[key] = all_pred_utt_MOS[key]
-            pred_dir = os.path.join(answer_dir, test_set, "ID", "rand_" + str(args.seed))
-            make_dir(pred_dir)
-            metrics_answer = calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, test_set + "-ID")
-            write_metrics(metrics_answer, pred_utt_MOS, pred_dir, args.model_config)
-        # Out Domain
-        if showOOD:
-            gt_sys_MOS = {}
-            gt_utt_MOS = {}
-            pred_sys_MOS = {}
-            pred_utt_MOS = {}
-            for key in all_gt_sys_MOS.keys():
-                if unseen_dict[key] is True:
-                    gt_sys_MOS[key] = all_gt_sys_MOS[key]
-                    pred_sys_MOS[key] = all_pred_sys_MOS[key]
-            for key in all_gt_utt_MOS.keys():
-                sys_id = key.split('-')[0]
-                if unseen_dict[sys_id] is True:
-                    gt_utt_MOS[key] = all_gt_utt_MOS[key]
-                    pred_utt_MOS[key] = all_pred_utt_MOS[key]
-            pred_dir = os.path.join(answer_dir, test_set, "OOD", "rand_" + str(args.seed))
-            make_dir(pred_dir)
-            metrics_answer = calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, test_set + "-OOD")
-            write_metrics(metrics_answer, pred_utt_MOS, pred_dir, args.model_config)
- 
+
+    
 if __name__ == '__main__':
     main()

@@ -1,0 +1,45 @@
+
+sample_rate: 16000  # deprecated: use model_param.sample_rate
+max_duration: 10.0   # deprecated: use model_param.max_duration
+
+# Model
+model_param:
+  ssl_model_type: "wav2vec2_large_ll60k"
+  # domain related
+  use_domain_id: false
+  domain_num: 5
+
+  # pitch related
+  use_pitch: false
+  pitch_type: "note" # note, histogram, raw
+  pitch_num: 128  # note: 128, histogram: 120, raw: e.g., 800
+
+  # judge related
+  use_judge_id: false
+  judge_num: 50
+
+  # model dims
+  hdim: 128
+  dnn_dim: 64
+
+# Loss 
+loss:
+  loss_type: "L1"
+  use_margin: true
+  margin: 0.1
+  use_frame_level: false
+  alpha_frame: 0.6
+
+optim: "sgd"
+optim_conf:
+  lr: 0.001
+  momentum: 0.9
+
+# Training
+train_datasets: ["singeval_p1", "singeval_p2", "singeval_p3"]
+use_amp: true
+grad_clip: 1.0
+batch_size: 15
+num_workers: 8
+max_epoch: 30
+train_patience: 15

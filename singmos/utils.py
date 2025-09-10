@@ -6,25 +6,6 @@ from scipy.interpolate import interp1d
 import logging
 
 
-def pad_sequence(sequences, max_length=None, padding_value=0):
-    """ 
-    Input:
-        sequences;
-        padding value;
-    Return:
-        padded sequences;
-    """
-    if max_length is None:
-        max_length = max(seq.shape[-1] for seq in sequences)
-    padded_sequences = torch.full(
-        (len(sequences), *sequences[0].shape[:-1], max_length),  
-        padding_value,
-        dtype=sequences[0].dtype
-    )
-    for i, seq in enumerate(sequences):
-        padded_sequences[i, ..., :seq.shape[-1]] = seq
-    return padded_sequences
-
 
 def _convert_to_continuous_f0(f0: np.array) -> np.array:
     if (f0 == 0).all():
@@ -52,80 +33,128 @@ def _convert_to_continuous_f0(f0: np.array) -> np.array:
 def f0_dio(
     audio,
     sampling_rate,
-    hop_size=320,
-    pitch_min=40,
-    pitch_max=800,
-    use_log_f0=False,
-    use_continuous_f0=False,
-    use_discrete_f0=True,
+    hop_size: int =320,
+    pitch_min: float=40.0,
+    pitch_max: float=799.0,
+    use_log_f0: bool=False,
+    use_continuous_f0: bool=False,
+    use_discrete_f0: bool=False,   # 建议默认 False，避免和 log 冲突
 ):
-    """Compute F0 with pyworld.dio
-
-    Args:
-        audio (ndarray): Audio signal (T,).
-        sampling_rate (int): Sampling rate.
-        hop_size (int): Hop size.
-        pitch_min (int): Minimum pitch in pitch extraction.
-        pitch_max (int): Maximum pitch in pitch extraction.
-
-    Returns:
-        ndarray: f0 feature (#frames, ).
-
-    Note:
-        Unvoiced frame has value = 0.
-
     """
-    if torch.is_tensor(audio):
-        x = audio.cpu().numpy().astype(np.double)
-    else:
-        x = audio.astype(np.double)
-    frame_period = 1000 * hop_size / sampling_rate
+    返回 f0: shape=(#frames,), 无声帧为 0。
+    - 线性域输出: Hz
+    - 对数域输出: log(Hz)
+    - 离散输出（若启用）默认在 Hz 上取整；如需半音/音高阶，建议改为 MIDI 量化。
+    """
     import pyworld
+
+    # to float64
+    if torch.is_tensor(audio):
+        x = audio.detach().cpu().numpy().astype(np.float64)
+    else:
+        x = np.asarray(audio, dtype=np.float64)
+
+    # hop_size(samples) -> frame_period(ms)
+    frame_period = 1000.0 * hop_size / float(sampling_rate)
+
+    # DIO + StoneMask
     f0, timeaxis = pyworld.dio(
         x,
         sampling_rate,
-        f0_floor=pitch_min,
-        f0_ceil=pitch_max,
+        f0_floor=float(pitch_min),
+        f0_ceil=float(pitch_max),
         frame_period=frame_period,
     )
-    f0 = pyworld.stonemask(x, f0, timeaxis, sampling_rate)
+    f0 = pyworld.stonemask(x, f0, timeaxis, sampling_rate)  # Hz, 无声≈0
+
+    # 连续化（若需要），只处理有声帧
     if use_continuous_f0:
-        f0 = _convert_to_continuous_f0(f0)
-    if use_log_f0:
-        nonzero_idxs = np.where(f0 != 0)[0]
-        f0[nonzero_idxs] = np.log(f0[nonzero_idxs])
+        f0 = _convert_to_continuous_f0(f0)  # 依你已有实现，输出仍在 Hz 域
+
+    # 仅对**有声帧**做裁剪，保持 0 为无声
+    voiced = f0 > 0
+    # f0[voiced & (f0 < pitch_min)] = pitch_min
+    f0[voiced & (f0 > pitch_max)] = pitch_max
+
     if use_discrete_f0:
-        f0 = np.round(f0)
-        f0 = f0.astype(int)
-    f0[f0 > pitch_max] = pitch_max
+        f0[voiced] = np.round(f0[voiced])
+        f0[voiced] = np.clip(f0[voiced], pitch_min, pitch_max)
+
+    if use_log_f0:
+        f0[voiced] = np.log(f0[voiced])
+
     return f0
 
 
-def calc_f0_variation(
+def calc_pitch_histogram(
     audio,
     sampling_rate,
-    hop_size=320,
-    pitch_min=40,
-    pitch_max=800,
-    use_log_f0=False,
-    use_continuous_f0=False,
-    use_discrete_f0=True,
-    bias=800,
-    return_tensor=True,
+    hop_size: int=320,
+    pitch_min: float=40,
+    pitch_max: float=799,
+    use_log_f0: bool=False,
+    use_continuous_f0: bool=False,
+    use_discrete_f0: bool=True,
+    return_tensor: bool=True,
 ):
-    """Compute f0 variation
+    f0 = f0_dio(
+        audio,
+        sampling_rate,
+        hop_size=hop_size,
+        pitch_min=pitch_min,
+        pitch_max=pitch_max,
+        use_log_f0=False,
+        use_continuous_f0=False,
+        use_discrete_f0=True,
+    )
+    # 仅使用有声帧
+    voiced = f0 > 0
+    if not np.any(voiced):
+        pitch_histogram = np.zeros(120, dtype=np.float32)
+        if return_tensor:
+            return torch.tensor(pitch_histogram, dtype=torch.float32)
+        return pitch_histogram
 
-    Args:
-        audio (ndarray): Audio signal (T,).
-        sampling_rate (int): Sampling rate.
-        hop_size (int): Hop size.
-        pitch_min (int): Minimum pitch in pitch extraction.
-        pitch_max (int): Maximum pitch in pitch extraction.
-        bias: Bias to ensure positive value in pitch variation
+    f0_voiced_hz = f0[voiced].astype(np.float64)
+
+    # 将 Hz 转换为 cents（相对于 A4=440Hz）
+    reference_freq = 440.0
+    f_cent_values = 1200.0 * np.log2(f0_voiced_hz / reference_freq)
+
+    # 量化到 120 个音高类（每 10 cents 一个 bin），取模到 [0, 120)
+    i_fcent_values = (f_cent_values / 10.0) % 120.0
+
+    # 统计直方图（向量化）
+    num_bins = 120
+    bin_indices = i_fcent_values.astype(np.int64)  # 0..119
+    pitch_histogram = np.bincount(bin_indices, minlength=num_bins).astype(np.float32)
+
+    # 归一化
+    total_frames_with_pitch = bin_indices.size
+    if total_frames_with_pitch > 0:
+        pitch_histogram /= float(total_frames_with_pitch)
+
+    if return_tensor:
+        return torch.tensor(pitch_histogram, dtype=torch.float32)
+    return pitch_histogram
+
+
+def calc_pitch_note(
+    audio,
+    sampling_rate,
+    hop_size: int=320,
+    pitch_min: float=40,
+    pitch_max: float=799,
+    use_log_f0: bool=False,
+    use_continuous_f0: bool=False,
+    use_discrete_f0: bool=True,
+    return_tensor: bool=True,
+):
+    """Compute MIDI-quantized pitch note sequence and its frame-wise variation.
 
     Returns:
-        np.int: start of f0 feature
-        ndarray: f0 variation feature (#frames, ).
+        pitch_var: (T,) frame-wise difference of MIDI notes (first element copied)
+        pitch_note: (T,) MIDI note per frame, unvoiced frames are 0
     """
     f0 = f0_dio(
         audio,
@@ -133,19 +162,54 @@ def calc_f0_variation(
         hop_size=hop_size,
         pitch_min=pitch_min,
         pitch_max=pitch_max,
-        use_log_f0=use_log_f0,
+        use_log_f0=False,
         use_continuous_f0=use_continuous_f0,
-        use_discrete_f0=use_discrete_f0,
+        use_discrete_f0=False,
     )
-    f0_variation = f0[1:] - f0[:-1]
-    f0_variation = f0_variation + bias
-    
-    if return_tensor is True:
-        f0_variation = torch.tensor(f0_variation)
-        f0_variation = torch.concat([torch.tensor([0]), f0_variation], dim=0)
-        f0 = torch.tensor(f0)
-    # logging.info(f'f0: {f0.max()}, f0_var: {f0_variation.max()}')
-    return f0_variation, f0
+    # frame-aligned arrays
+    num_frames = f0.shape[0]
+    pitch_note = np.zeros(num_frames, dtype=np.float32)
+
+    # voiced mask
+    voiced = f0 > 0
+    if np.any(voiced):
+        f0_voiced_hz = f0[voiced].astype(np.float64)
+        # Hz -> MIDI: 69 + 12*log2(f/440)
+        midi_vals = 69.0 + 12.0 * np.log2(f0_voiced_hz / 440.0)
+        midi_quant = np.rint(midi_vals).astype(np.float32)
+        pitch_note[voiced] = midi_quant
+
+    # frame-wise difference (prepend first value)
+    if num_frames > 0:
+        pitch_var = np.concatenate(([pitch_note[0]], pitch_note[1:] - pitch_note[:-1])).astype(np.float32)
+        pitch_var[1:] += 128
+    else:
+        pitch_var = np.zeros(0, dtype=np.float32)
+
+    if return_tensor:
+        pitch_var = torch.tensor(pitch_var, dtype=torch.float32)
+        pitch_note = torch.tensor(pitch_note, dtype=torch.float32)
+    return pitch_var, pitch_note
+
+
+def pad_sequence(sequences, max_length=None, padding_value=0):
+    """ 
+    Input:
+        sequences;
+        padding value;
+    Return:
+        padded sequences;
+    """
+    if max_length is None:
+        max_length = max(seq.shape[-1] for seq in sequences)
+    padded_sequences = torch.full(
+        (len(sequences), *sequences[0].shape[:-1], max_length),  
+        padding_value,
+        dtype=sequences[0].dtype
+    )
+    for i, seq in enumerate(sequences):
+        padded_sequences[i, ..., :seq.shape[-1]] = seq
+    return padded_sequences
 
 
 # make_pad_mask and make_non_pad_mask are based on:
