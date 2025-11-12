@@ -1,3 +1,4 @@
+# config for SSL model + domain id / config for SSL model + domain id + MDF-stage2
 
 sample_rate: 16000  # deprecated: use model_param.sample_rate
 max_duration: 10.0   # deprecated: use model_param.max_duration
@@ -7,7 +8,7 @@ model_param:
   ssl_model_type: "wav2vec2_large_ll60k"
   # domain related
   use_domain_id: true
-  domain_num: 5
+  domain_num: 6
 
   # pitch related
   use_pitch: false
@@ -36,10 +37,12 @@ optim_conf:
   momentum: 0.9
 
 # Training
-train_datasets: ["singeval_p1", "singeval_p2", "singeval_p3"]
+train_datasets: ["all"] # "all" means all datasets will be used
+padding_mode: "repeat"
+
 use_amp: true
 grad_clip: 1.0
 batch_size: 15
 num_workers: 8
-max_epoch: 30
+max_epoch: 200
 train_patience: 15

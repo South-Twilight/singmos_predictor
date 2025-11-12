@@ -1,4 +1,4 @@
-# config for SSL model / config for SSL + MDF-stage2
+# config for SSL model + domain id / config for SSL model + domain id + MDF-stage2
 
 sample_rate: 16000  # deprecated: use model_param.sample_rate
 max_duration: 10.0   # deprecated: use model_param.max_duration
@@ -11,9 +11,9 @@ model_param:
   domain_num: 6
 
   # pitch related
-  use_pitch: false
-  pitch_type: "note" # note, histogram, raw
-  pitch_num: 128  # note: 128, histogram: 120, raw: e.g., 800
+  use_pitch: true
+  pitch_type: "histogram" # note, histogram, raw
+  pitch_num: 120  # note: 128, histogram: 120, raw: e.g., 800
 
   # judge related
   use_judge_id: false

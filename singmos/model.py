@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from s3prl.nn import S3PRLUpstream
 
-from .utils import make_non_pad_mask
+from .utils import make_non_pad_mask, HOP_SIZE
 
 ssl_model_list = [
     "wavlm_base",
@@ -210,7 +210,8 @@ class MOS_Predictor(nn.Module):
             loss, stats, ret_val
         """
         ssl_feature = self.ssl_model(audio, audio_length)  # [B, T, D]
-        T_len = ssl_feature.shape[1]
+        bs, T_len = ssl_feature.shape[0], ssl_feature.shape[1]
+        audio_token_length = torch.ceil(audio_length / HOP_SIZE)
 
         x = ssl_feature
 
@@ -242,24 +243,25 @@ class MOS_Predictor(nn.Module):
         if self.use_judge_id:
             judge_idx = judge_id.long()
             judge_feat = self.judge_emb(judge_idx)  # [B, hdim]
-            judge_feat = judge_feat.unsqueeze(1).expand(-1, T_len, -1)  # tile over time
+            judge_feat = judge_feat.unsqueeze(1).expand(bs, T_len, -1)  # tile over time
             x = torch.cat((x, judge_feat), dim=-1)
         
         if self.use_domain_id:
             domain_idx = domain_id.long()
             domain_feat = self.domain_emb(domain_idx) # [B, hdim]
-            domain_feat = domain_feat.unsqueeze(1).expand(-1, T_len, -1) # tile over time
+            domain_feat = domain_feat.unsqueeze(1).expand(bs, T_len, -1) # tile over time
             x = torch.cat((x, domain_feat), dim=-1)
 
         # mean net 
         decoder_input = x 
-        pred_frame_score = self.decoder(decoder_input)
+        pred_frame_score = self.decoder(decoder_input).squeeze(-1)
         pred_utt_score = torch.mean(pred_frame_score, dim=1)
+
         if is_train:
             utt_loss = self.loss(pred_utt_score, gt_utt_score)
-            masks = make_non_pad_mask(audio_length)
             if self.use_frame_level:
-                frame_loss = self.loss(pred_frame_score, gt_frame_score, masks, frame_level=True)
+                # padding with repeat, no need to make mask
+                frame_loss = self.loss(pred_frame_score, gt_frame_score, frame_level=True)
 
         ret_val = {
             "utt_score": pred_utt_score,

@@ -17,6 +17,20 @@ import json
 import logging
 logging.basicConfig(level=logging.INFO)
 
+num_dict = {
+    "singeval_p1": {
+        "utt": 1287,
+        "sys": 35,
+    },
+    "singeval_p2": {
+        "utt": 1379,
+        "sys": 63,
+    },
+    "singeval_p3": {
+        "utt": 339,
+        "sys": 16,
+    },
+}
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -72,7 +86,6 @@ def infer_mos(model, dataloader, dset, device):
         batch = {
             "audio": wavs,
             "audio_length": wavs_length,
-            "is_train": False,
         }
         # optional features
         if "pitch_var" in ret_dict:
@@ -98,7 +111,7 @@ def infer_mos(model, dataloader, dset, device):
             batch["domain_id"] = torch.ones(batch_size, dtype=torch.long, device=device)
 
         with torch.no_grad():
-            loss, stats, ret_val = model(**batch)
+            loss, stats, ret_val = model(**batch, is_train=False)
 
         # Handle batch predictions
         utt_scores = ret_val["utt_score"].squeeze().detach().cpu()  # [B]
@@ -123,18 +136,18 @@ def calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, dset):
     logging.info(f'Starting prediction over {dset}')
     metrics_answer = {"system": {}, "utterance": {}}
 
-    assert len(gt_utt_MOS) == len(pred_utt_MOS)
-    assert len(gt_sys_MOS) == len(pred_sys_MOS)
+    assert len(gt_utt_MOS) == len(pred_utt_MOS), f"len(gt_utt_MOS): {len(gt_utt_MOS)}, len(pred_utt_MOS): {len(pred_utt_MOS)}"
+    assert len(gt_sys_MOS) == len(pred_sys_MOS), f"len(gt_sys_MOS): {len(gt_sys_MOS)}, len(pred_sys_MOS): {len(pred_sys_MOS)}"
 
     # UTTERANCE
     sorted_uttIDs = sorted(gt_utt_MOS.keys())
     truths = np.array([gt_utt_MOS[u] for u in sorted_uttIDs])
     preds = np.array([pred_utt_MOS[u] for u in sorted_uttIDs])
 
-    MSE = np.mean((truths - preds) ** 2)
-    LCC = np.corrcoef(truths, preds)[0][1]
-    SRCC = scipy.stats.spearmanr(truths.T, preds.T)[0]
-    KTAU = scipy.stats.kendalltau(truths, preds)[0]
+    MSE = round(np.mean((truths - preds) ** 2), 2)
+    LCC = round(np.corrcoef(truths, preds)[0][1], 2)
+    SRCC = round(scipy.stats.spearmanr(truths.T, preds.T)[0], 2)
+    KTAU = round(scipy.stats.kendalltau(truths, preds)[0], 2)
 
     metrics_answer["utterance"].update(MSE=MSE, LCC=LCC, SRCC=SRCC, KTAU=KTAU)
     logging.info('[UTTERANCE] Test error= %f' % MSE)
@@ -147,10 +160,10 @@ def calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, dset):
     sys_true = np.array([gt_sys_MOS[s] for s in pred_sysIDs])
     sys_pred = np.array([pred_sys_MOS[s] for s in pred_sysIDs])
 
-    MSE = np.mean((sys_true - sys_pred) ** 2)
-    LCC = np.corrcoef(sys_true, sys_pred)[0][1]
-    SRCC = scipy.stats.spearmanr(sys_true.T, sys_pred.T)[0]
-    KTAU = scipy.stats.kendalltau(sys_true, sys_pred)[0]
+    MSE = round(np.mean((sys_true - sys_pred) ** 2), 2)
+    LCC = round(np.corrcoef(sys_true, sys_pred)[0][1], 2)
+    SRCC = round(scipy.stats.spearmanr(sys_true.T, sys_pred.T)[0], 2)
+    KTAU = round(scipy.stats.kendalltau(sys_true, sys_pred)[0], 2)
 
     metrics_answer["system"].update(MSE=MSE, LCC=LCC, SRCC=SRCC, KTAU=KTAU)
     logging.info('[SYSTEM] Test error= %f' % MSE)
@@ -161,16 +174,84 @@ def calc_metrics(gt_utt_MOS, pred_utt_MOS, gt_sys_MOS, pred_sys_MOS, dset):
     return metrics_answer
 
 
-def write_metrics(metrics_answer, pred_utt_MOS, pred_dir, config_name):
+def write_metrics(metrics_answer, pred_utt_MOS, pred_dir, config_name, test_set):
     filename = config_name.split("/")[-1].split(".")[0]
-    with open(os.path.join(pred_dir, "metrics" + ".json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(pred_dir, f"metrics_{test_set}.json"), "w", encoding="utf-8") as f:
         json.dump(metrics_answer, f, cls=NumpyEncoder, indent=4)
-    logging.info('Metrics writen in {}'.format(os.path.join(pred_dir, "metrics" + ".json")))
-    with open(os.path.join(pred_dir, "utt_mos" + ".txt"), "w", encoding="utf-8") as f:
+    logging.info('Metrics writen in {}'.format(os.path.join(pred_dir, f"metrics_{test_set}.json")))
+    with open(os.path.join(pred_dir, f"utt_mos_{test_set}.txt"), "w", encoding="utf-8") as f:
         for k, v in pred_utt_MOS.items():
             outl = k.split('.')[0] + ',' + str(v) + '\n'
             f.write(outl)
     logging.info('Utt MOS writen in {}'.format(os.path.join(pred_dir, "utt_mos" + ".txt")))
+
+
+def write_joined_metrics(pred_dir, test_set_names, joined_metrics, weights):
+    """Write a slash-joined summary across multiple test sets, with weighted averages.
+
+    joined_metrics structure:
+    {
+        "utterance": {"MSE": [..], "LCC": [..], "SRCC": [..], "KTAU": [..]},
+        "system": {"MSE": [..], "LCC": [..], "SRCC": [..], "KTAU": [..]},
+    }
+    weights structure:
+    {
+        "utterance": [w1, w2, ...],  # number of utterances per test set
+        "system": [w1, w2, ...],     # number of systems per test set
+    }
+    """
+    make_dir(pred_dir)
+    # Human-readable summary
+    lines = []
+    sep = "$|$"
+    header = sep.join(test_set_names)
+    lines.append(f"Test sets: {header}")
+    joined_avgs = {"utterance": {}, "system": {}}
+    final_parts = {"utterance": {}, "system": {}}
+    for level in ["utterance", "system"]:
+        lines.append(f"[{level.upper()}]")
+        level_weights = weights.get(level, [])
+        total_w = float(sum(level_weights)) if level_weights else 0.0
+        for metric_name in ["MSE", "LCC", "SRCC", "KTAU"]:
+            values = joined_metrics[level].get(metric_name, [])
+            joined_str = sep.join(f"{v:.2f}" for v in values)
+            # weighted average as the 4th value (after p1, p2, p3)
+            if total_w > 0 and len(values) == len(level_weights):
+                avg = sum(v * w for v, w in zip(values, level_weights)) / total_w
+            else:
+                avg = float(np.mean(values)) if values else 0.0
+            joined_avgs[level][metric_name] = round(avg, 2)
+            lines.append(f"{metric_name}: {joined_str}{sep}{avg:.2f}")
+            final_parts[level][metric_name] = f"{joined_str}{sep}{avg:.2f}"
+    txt_path = os.path.join(pred_dir, "metrics_joined.txt")
+    # Compose one-line final result in order:
+    # utt MSE & utt LCC & utt SRCC & system MSE & system LCC & system SRCC
+    final_line = " & ".join([
+        final_parts["utterance"].get("MSE", ""),
+        final_parts["utterance"].get("LCC", ""),
+        final_parts["utterance"].get("SRCC", ""),
+        final_parts["system"].get("MSE", ""),
+        final_parts["system"].get("LCC", ""),
+        final_parts["system"].get("SRCC", ""),
+    ])
+    lines.append("")
+    lines.append("FINAL: " + final_line)
+
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write('\n'.join(lines))
+    logging.info('Joined metrics written in {}'.format(txt_path))
+
+    # Also dump a one-line file for easy parsing
+    final_txt_path = os.path.join(pred_dir, "metrics_final_line.txt")
+    with open(final_txt_path, "w", encoding="utf-8") as f:
+        f.write(final_line + "\n")
+    logging.info('Final one-line metrics written in {}'.format(final_txt_path))
+
+    # Also dump a JSON for programmatic use
+    json_path = os.path.join(pred_dir, "metrics_joined.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump({"test_sets": test_set_names, "metrics": joined_metrics, "weights": weights, "avg": joined_avgs}, f, cls=NumpyEncoder, indent=4)
+    logging.info('Joined metrics JSON written in {}'.format(json_path))
 
 
 def get_parser():
@@ -218,6 +299,17 @@ def main():
     with open(f"{datadir}/info/sys_info.json", "r") as f:
         sys_info = json.load(f)
 
+    # Prepare joined metrics containers
+    test_set_names = []
+    joined_metrics = {
+        "utterance": {"MSE": [], "LCC": [], "SRCC": [], "KTAU": []},
+        "system": {"MSE": [], "LCC": [], "SRCC": [], "KTAU": []},
+    }
+    weights = {
+        "utterance": [],
+        "system": [],
+    }
+
     for test_set in args.test_sets:
         logging.info(f'Loading data {test_set}')
         eval_list = split_info[test_set]["eval"]
@@ -226,17 +318,33 @@ def main():
         # Infer model
         all_pred_sys_MOS, all_pred_utt_MOS = infer_mos(model, eval_loader, test_set, device)
         # 更安全的版本，处理不同的数据结构
+        all_gt_utt_MOS = {}
         all_gt_sys_MOS = {}
-        for k in eval_set.get_sys_names():
-            sys_score = score_info["system"][k]
-            all_gt_sys_MOS[k] = float(sys_score["score"])
-        all_gt_utt_MOS = {k: float(score_info["utterance"][k]["score"]["mos"]) for k in eval_set.get_utt_names()}
+        for k in eval_set.get_utt_names():
+            all_gt_utt_MOS[k] = float(score_info["utterance"][k]["score"]["mos"])
+            sys_id = systemID(k)
+            if sys_id not in all_gt_sys_MOS:
+                all_gt_sys_MOS[sys_id] = []
+            all_gt_sys_MOS[sys_id].append(all_gt_utt_MOS[k])
+        all_gt_sys_MOS = {k: (sum(v) / (len(v) * 1.0)) for k, v in all_gt_sys_MOS.items()}
 
         # All
         pred_dir = os.path.join(answer_dir, os.path.basename(args.ckpt).split(".")[0])
         make_dir(pred_dir)
-        metrics_answer = calc_metrics(all_gt_utt_MOS, all_pred_utt_MOS, all_gt_sys_MOS, all_pred_sys_MOS, test_set + "-ALL")
-        write_metrics(metrics_answer, all_pred_utt_MOS, pred_dir, args.model_config)
+        metrics_answer = calc_metrics(all_gt_utt_MOS, all_pred_utt_MOS, all_gt_sys_MOS, all_pred_sys_MOS, test_set)
+        write_metrics(metrics_answer, all_pred_utt_MOS, pred_dir, args.model_config, test_set)
+
+        # Collect for joined metrics (preserve order of args.test_sets)
+        test_set_names.append(test_set)
+        weights["utterance"].append(len(eval_set.get_utt_names()))
+        weights["system"].append(len(all_gt_sys_MOS))
+        for level in ["utterance", "system"]:
+            for metric_name in ["MSE", "LCC", "SRCC", "KTAU"]:
+                joined_metrics[level][metric_name].append(metrics_answer[level][metric_name])
+
+    # Write joined summary across all test sets
+    if test_set_names:
+        write_joined_metrics(pred_dir, test_set_names, joined_metrics, weights)
 
     
 if __name__ == '__main__':

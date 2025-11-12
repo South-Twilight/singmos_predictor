@@ -5,7 +5,7 @@ from scipy.interpolate import interp1d
 
 import logging
 
-
+HOP_SIZE = 320
 
 def _convert_to_continuous_f0(f0: np.array) -> np.array:
     if (f0 == 0).all():
@@ -192,23 +192,44 @@ def calc_pitch_note(
     return pitch_var, pitch_note
 
 
-def pad_sequence(sequences, max_length=None, padding_value=0):
+def pad_sequence(sequences, max_length=None, padding_value=0, padding_mode="zero_pad"):
     """ 
     Input:
-        sequences;
-        padding value;
+        sequences: List of sequences to pad
+        max_length: Maximum length to pad to (if None, use max length in sequences)
+        padding_value: Value to use for zero padding (only used when padding_mode="zero_pad")
+        padding_mode: "zero_pad" or "repeat"
     Return:
         padded sequences;
     """
     if max_length is None:
         max_length = max(seq.shape[-1] for seq in sequences)
-    padded_sequences = torch.full(
-        (len(sequences), *sequences[0].shape[:-1], max_length),  
-        padding_value,
-        dtype=sequences[0].dtype
-    )
-    for i, seq in enumerate(sequences):
-        padded_sequences[i, ..., :seq.shape[-1]] = seq
+    
+    if padding_mode == "zero_pad":
+        padded_sequences = torch.full(
+            (len(sequences), *sequences[0].shape[:-1], max_length),  
+            padding_value,
+            dtype=sequences[0].dtype
+        )
+        for i, seq in enumerate(sequences):
+            padded_sequences[i, ..., :seq.shape[-1]] = seq
+    elif padding_mode == "repeat":
+        padded_sequences = torch.zeros(
+            (len(sequences), *sequences[0].shape[:-1], max_length),
+            dtype=sequences[0].dtype
+        )
+        for i, seq in enumerate(sequences):
+            seq_len = seq.shape[-1]
+            if seq_len > 0:
+                # 计算需要重复多少次
+                repeat_times = (max_length + seq_len - 1) // seq_len
+                # 重复序列
+                repeated_seq = seq.repeat(*([1] * (seq.dim() - 1)), repeat_times)
+                # 截取到目标长度
+                padded_sequences[i, ...] = repeated_seq[..., :max_length]
+    else:
+        raise ValueError(f"Unsupported padding_mode: {padding_mode}. Must be 'zero_pad' or 'repeat'.")
+    
     return padded_sequences
 
 

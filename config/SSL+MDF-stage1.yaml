@@ -8,7 +8,7 @@ model_param:
   ssl_model_type: "wav2vec2_large_ll60k"
   # domain related
   use_domain_id: false
-  domain_num: 6
+  domain_num: 6 # 0 is for unknown domain
 
   # pitch related
   use_pitch: false
@@ -37,7 +37,7 @@ optim_conf:
   momentum: 0.9
 
 # Training
-train_datasets: ["all"] # "all" means all datasets will be used
+train_datasets: ["singmospro-p3"]
 padding_mode: "repeat"
 
 use_amp: true

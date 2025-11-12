@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import math
 
 import torch
 import torchaudio
@@ -8,8 +9,9 @@ import torch.nn as nn
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import DataLoader
 
-from singmos.utils import calc_pitch_note, calc_pitch_histogram, f0_dio
-from singmos.utils import pad_sequence
+from .utils import calc_pitch_note, calc_pitch_histogram, f0_dio
+from .utils import pad_sequence
+from .utils import HOP_SIZE
 
 
 class MOSDataset(Dataset):
@@ -25,6 +27,7 @@ class MOSDataset(Dataset):
         pitch_type: str = "note",
         sample_rate: int = 16000,
         max_duration: float = 10.0,
+        padding_mode: str = "repeat",  # 新增参数
     ):
         # Backward compatibility: accept legacy arg name
         self.max_duration = max_duration
@@ -33,6 +36,7 @@ class MOSDataset(Dataset):
         self.use_pitch = use_pitch
         self.use_domain_id = use_domain_id
         self.sys_info = sys_info
+        self.padding_mode = padding_mode  # 保存填充方式
         assert pitch_type in ["raw", "note", "histogram"], "pitch_type must be note or histogram"
         self.pitch_type = pitch_type
 
@@ -47,6 +51,8 @@ class MOSDataset(Dataset):
             # judge 0 means the mean of judges
             mean_id = idx + "_0"
             sys_id = score_info[idx]["sys_id"]
+            if sys_info[sys_id]["sample_rate"] != 16000:
+                continue
             wavnames.append(mean_id)
             gt_utt_scores[mean_id] = float(score_info[idx]["score"]["mos"])
             wavs[mean_id] = os.path.join(datadir, score_info[idx]["wav"])
@@ -67,6 +73,7 @@ class MOSDataset(Dataset):
         self.wavs = {k: v for k, v in sorted(wavs.items(), key=lambda x: x[0])}
         self.gt_utt_scores = {k: v for k, v in sorted(gt_utt_scores.items(), key=lambda x: x[0])}
         self.domain_ids = {k: v for k, v in sorted(domain_ids.items(), key=lambda x: x[0])}
+        logging.info(f'remained utt number: {len(self.wavnames)}, remained sys number: {len(self.sysnames)}')
 
         
     def __getitem__(self, idx):
@@ -84,6 +91,7 @@ class MOSDataset(Dataset):
         """
         wavname = self.wavnames[idx]
         wav, original_sample_rate = torchaudio.load(self.wavs[wavname])
+        wav = torch.mean(wav, dim=0, keepdim=True)
         
         # 检查采样率并进行重采样
         if original_sample_rate != self.sample_rate:
@@ -109,6 +117,7 @@ class MOSDataset(Dataset):
         wavname = "".join(items[:-1])
         judge_id = int(items[-1])
         ret_dict.update(judge_id=judge_id)
+        token_len = math.ceil(wav.shape[-1] / HOP_SIZE)
         if self.use_pitch:
             if self.pitch_type == "note":
                 pitch_var, pitch_note = calc_pitch_note(
@@ -118,6 +127,8 @@ class MOSDataset(Dataset):
                     use_continuous_f0=False,
                     use_discrete_f0=True,
                 )
+                pitch_var = pitch_var[:token_len]
+                pitch_note = pitch_note[:token_len]
                 ret_dict.update(pitch_var=pitch_var)
                 ret_dict.update(pitch_note=pitch_note)
             elif self.pitch_type == "histogram":
@@ -128,6 +139,7 @@ class MOSDataset(Dataset):
                     use_continuous_f0=False,
                     use_discrete_f0=True,
                 )
+                pitch_histogram = pitch_histogram[:token_len]
                 ret_dict.update(pitch_histogram=pitch_histogram)
             elif self.pitch_type == "raw":
                 pitch = f0_dio(
@@ -137,6 +149,7 @@ class MOSDataset(Dataset):
                     use_continuous_f0=False,
                     use_discrete_f0=True,
                 )
+                pitch = pitch[:token_len]
                 ret_dict.update(pitch=pitch)
         return wavname, wav, gt_utt_score, gt_utt_score, ret_dict
     
@@ -154,11 +167,10 @@ class MOSDataset(Dataset):
         judge_wavnames, wavs, scores, mean_scores, ret_dicts = zip(*batch)
 
         # padding wavs
-        collate_wavs = pad_sequence(wavs)
         wavs_length = torch.tensor([seq.shape[-1] for seq in wavs])
-        T_max = torch.max(wavs_length, dim=0)
-        collate_scores = pad_sequence(scores)
-        collate_mean_scores = pad_sequence(mean_scores)
+        collate_wavs = pad_sequence(wavs, padding_mode=self.padding_mode)
+        collate_scores = torch.stack(scores)
+        collate_mean_scores = torch.stack(mean_scores)
         collate_ret_dict = {}
 
         if "judge_id" in ret_dicts[0]:
@@ -171,19 +183,19 @@ class MOSDataset(Dataset):
 
         if "pitch_var" in ret_dicts[0]:
             pitch_var = [rd['pitch_var'] for rd in ret_dicts]
-            collate_ret_dict["pitch_var"] = pad_sequence(pitch_var, max_length=T_max)
+            collate_ret_dict["pitch_var"] = pad_sequence(pitch_var, padding_mode=self.padding_mode)
         
         if "pitch_note" in ret_dicts[0]:
             pitch_note = [rd['pitch_note'] for rd in ret_dicts]
-            collate_ret_dict["pitch_note"] = pad_sequence(pitch_note, max_length=T_max)
+            collate_ret_dict["pitch_note"] = pad_sequence(pitch_note, padding_mode=self.padding_mode)
 
         if "pitch_histogram" in ret_dicts[0]:
             pitch_histogram = [rd['pitch_histogram'] for rd in ret_dicts]
-            collate_ret_dict["pitch_histogram"] = pad_sequence(pitch_histogram, max_length=T_max)
+            collate_ret_dict["pitch_histogram"] = pad_sequence(pitch_histogram, padding_mode=self.padding_mode)
         
         if "pitch" in ret_dicts[0]:
             pitch = [rd['pitch'] for rd in ret_dicts]
-            collate_ret_dict["pitch"] = pad_sequence(pitch, max_length=T_max)
+            collate_ret_dict["pitch"] = pad_sequence(pitch, padding_mode=self.padding_mode)
         
         return judge_wavnames, collate_wavs, wavs_length, collate_scores, collate_mean_scores, collate_ret_dict
 
@@ -202,11 +214,16 @@ def setup_dataloader_from_DATA(
     with open(f"{dataset_path}/info/sys_info.json", "r") as f:
         sys_info = json.load(f)
     
-    train_list = []
     if merge_diff_train is False:
         assert len(train_datasets) == 1
-    for train_dataset in train_datasets:
-        train_list.extend(split_info[train_dataset]["train"])
+
+    train_list = []
+    if "all" in train_datasets:
+        for dataset in split_info.keys():
+            train_list.extend(split_info[dataset]["train"])
+    else:
+        for train_dataset in train_datasets:
+            train_list.extend(split_info[train_dataset]["train"])
     
     train_set = MOSDataset(
         datadir=dataset_path,
@@ -218,7 +235,8 @@ def setup_dataloader_from_DATA(
         use_pitch=config["model_param"]["use_pitch"],
         pitch_type=config["model_param"]["pitch_type"],
         sample_rate=config["sample_rate"],
-        max_duration=config["max_duration"]
+        max_duration=config["max_duration"],
+        padding_mode=config["padding_mode"],
     )
 
     logging.info(f"train_set: {len(train_set)}")
@@ -228,6 +246,7 @@ def setup_dataloader_from_DATA(
         batch_size=config["batch_size"], 
         shuffle=True, 
         num_workers=config["num_workers"],
-        collate_fn=train_set.collate_fn
+        collate_fn=train_set.collate_fn,
+        pin_memory=True,
     )
     return trainloader
